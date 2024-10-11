@@ -48,7 +48,7 @@ pub async fn run_service(config: Config) -> anyhow::Result<()> {
     let serve_query_server_task = smol::spawn(serve_query_server(server_state));
 
     run_ping_monitors_task.await;
-    serve_query_server_task.await;
+    serve_query_server_task.await?;
 
     Ok(())
 }

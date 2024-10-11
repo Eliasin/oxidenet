@@ -209,12 +209,6 @@ impl PingMonitor {
         }
     }
 
-    pub fn readings(&self) -> Vec<PingReading> {
-        let ping_reading_history = self.ping_reading_history.lock().unwrap();
-
-        ping_reading_history.readings().to_vec().clone()
-    }
-
     pub fn reading_history(&self) -> Arc<Mutex<PingReadingHistory>> {
         self.ping_reading_history.clone()
     }

@@ -1,12 +1,18 @@
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
 
-use crate::ping::{PingReading, PingReadingHistory, PingReadingQuery};
+use smol::net::unix::{UnixListener, UnixStream};
+use smol::stream::StreamExt;
+
+use crate::{
+    client::ClientCommand,
+    ping::{PingReading, PingReadingHistory, PingReadingQuery},
+    util::{receive_length_prefixed_object_async, send_length_prefixed_object_async},
+};
 
 #[derive(Serialize, Deserialize)]
 pub enum ServerResponse {
@@ -19,53 +25,83 @@ pub struct ServerState {
     pub ping_reading_histories: HashMap<String, Arc<Mutex<PingReadingHistory>>>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
 pub struct TargetAndPingReadingQuery {
-    target: Option<String>,
-    query: PingReadingQuery,
+    pub target: Option<String>,
+    pub query: PingReadingQuery,
 }
 
-pub async fn serve_query_server(server_state: ServerState) {
-    use async_compat::Compat;
-    use warp::Filter;
+fn query_ping_readings_for_targets<
+    'a,
+    I: Iterator<Item = (&'a String, &'a Arc<Mutex<PingReadingHistory>>)>,
+>(
+    target_readings: I,
+    query: &PingReadingQuery,
+) -> HashMap<String, Vec<PingReading>> {
+    let mut results = HashMap::new();
 
-    let server_state = Box::leak(Box::new(server_state));
+    for (target, reading_history) in target_readings {
+        let reading_history = reading_history.lock().unwrap();
 
-    let app =
-        warp::path("pings")
-            .and(warp::body::json())
-            .map(|ping_query: TargetAndPingReadingQuery| {
-                let mut reading_results: HashMap<String, Vec<PingReading>> = HashMap::new();
+        let target_result = query.query(reading_history.readings());
 
-                let queried_histories: Vec<(String, Vec<PingReading>)> = match ping_query.target {
-                    Some(target) => match server_state.ping_reading_histories.get(&target) {
-                        Some(ping_reading_history) => {
-                            vec![(
-                                target,
-                                ping_reading_history.lock().unwrap().readings().to_vec(),
-                            )]
-                        }
-                        None => {
-                            return warp::reply::json(&json!({
-                                "error": format!("Unknown target: {target}")
-                            }))
-                        }
-                    },
-                    None => server_state
-                        .ping_reading_histories
-                        .iter()
-                        .map(|(target, history)| {
-                            (target.clone(), history.lock().unwrap().readings().to_vec())
-                        })
-                        .collect(),
-                };
+        results.insert(target.clone(), target_result);
+    }
 
-                for (target, queried_history) in queried_histories {
-                    reading_results.insert(target, ping_query.query.query(&queried_history));
+    results
+}
+
+async fn serve_client(mut stream: UnixStream, server_state: &ServerState) -> anyhow::Result<()> {
+    loop {
+        let command: anyhow::Result<ClientCommand> =
+            receive_length_prefixed_object_async(&mut stream).await;
+        match command {
+            Ok(command) => match command {
+                ClientCommand::TargetAndPingReadingQuery(TargetAndPingReadingQuery {
+                    target,
+                    query,
+                }) => {
+                    let result = if let Some(target) = target {
+                        query_ping_readings_for_targets(
+                            server_state
+                                .ping_reading_histories
+                                .get_key_value(&target)
+                                .into_iter(),
+                            &query,
+                        )
+                    } else {
+                        query_ping_readings_for_targets(
+                            server_state.ping_reading_histories.iter(),
+                            &query,
+                        )
+                    };
+
+                    send_length_prefixed_object_async(
+                        &ServerResponse::PingQueryResult(result),
+                        &mut stream,
+                    )
+                    .await?;
                 }
+                ClientCommand::Disconnect => {
+                    return Ok(());
+                }
+            },
+            Err(e) => anyhow::bail!(e),
+        }
+    }
+}
 
-                warp::reply::json(&reading_results)
-            });
+pub async fn serve_query_server(server_state: ServerState) -> anyhow::Result<()> {
+    let listener = UnixListener::bind(crate::UNIX_SOCKET_PATH)?;
 
-    Compat::new(warp::serve(app).run(([127, 0, 0, 1], 3031))).await;
+    let mut incoming = listener.incoming();
+
+    while let Some(stream) = incoming.next().await {
+        let stream = stream?;
+        if let Err(e) = serve_client(stream, &server_state).await {
+            log::error!("Encountered error serving client: {e}");
+        }
+    }
+
+    Ok(())
 }

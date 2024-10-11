@@ -1,6 +1,9 @@
 use std::{path::PathBuf, time::Duration};
 
 use clap::{Parser, Subcommand};
+use client::{display_ping_query_results, send_client_command, ClientCommand};
+use ping::PingReadingQuery;
+use server::{ServerResponse, TargetAndPingReadingQuery};
 use smol::io::AsyncReadExt;
 use smol_macros::main;
 
@@ -12,6 +15,9 @@ mod monitor;
 mod ping;
 mod server;
 mod service;
+mod util;
+
+pub const UNIX_SOCKET_PATH: &str = "/tmp/oxidenet";
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -56,25 +62,34 @@ enum Command {
     },
 }
 
-async fn test() {
-    let mut ping_monitor =
-        ping::PingMonitor::new("8.8.8.8".to_string(), 1.0, Duration::from_secs(60 * 60));
+fn run_query(query: Query) -> anyhow::Result<()> {
+    match query {
+        Query::Ping {
+            target,
+            latency_higher_than,
+            min_intensity,
+            max_window,
+        } => {
+            let query = PingReadingQuery::new(
+                Duration::from_millis(latency_higher_than.into()),
+                min_intensity,
+                Duration::from_secs(max_window.into()),
+            );
 
-    let reading_history = ping_monitor.reading_history();
+            let server_response = send_client_command(ClientCommand::TargetAndPingReadingQuery(
+                TargetAndPingReadingQuery { target, query },
+            ))?;
 
-    smol::spawn(async move { ping_monitor.watch().await }).detach();
-
-    let query = ping::PingReadingQuery::new(Duration::from_millis(20), 5, Duration::from_secs(20));
-
-    loop {
-        smol::Timer::after(std::time::Duration::from_secs(5)).await;
-        let results = query.query(reading_history.lock().unwrap().readings());
-
-        println!("{:?}", results);
+            match server_response {
+                ServerResponse::PingQueryResult(results) => {
+                    display_ping_query_results(&results);
+                }
+                ServerResponse::UnknownTarget(target) => {
+                    println!("Server reply: Unknown target {target}");
+                }
+            }
+        }
     }
-}
-
-async fn run_query(query: Query) -> anyhow::Result<()> {
     Ok(())
 }
 
@@ -95,7 +110,7 @@ main! {
                 service::run_service(config).await
             },
             Command::Query { query } => {
-                run_query(query).await
+                run_query(query)
             },
         }
     }
