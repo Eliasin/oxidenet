@@ -1,7 +1,9 @@
 use std::{path::PathBuf, time::Duration};
 
 use clap::{Parser, Subcommand};
-use client::{display_ping_query_results, send_client_command, ClientCommand};
+use client::{
+    display_ping_query_results, send_client_command, ClientCommand, PingQueryResultDisplayOptions,
+};
 use ping::PingReadingQuery;
 use server::{ServerResponse, TargetAndPingReadingQuery};
 use smol::io::AsyncReadExt;
@@ -45,6 +47,24 @@ pub enum Query {
             help = "maximum size of time window that is remembered when traversing ping logs for ping over the threshold, in seconds"
         )]
         max_window: u32,
+        #[arg(
+            long,
+            short = 's',
+            help = "the minimum time between two ping readings that triggers a display warning, in seconds"
+        )]
+        display_skip_warning_threshold: Option<u32>,
+        #[arg(
+            long,
+            short = 'f',
+            help = "a format string for the time, the format is defined by chrono::format::strftime"
+        )]
+        time_format: Option<String>,
+        #[arg(
+            long,
+            short = 'o',
+            help = "show the original lines from the ping utility"
+        )]
+        show_original_line: bool,
     },
 }
 
@@ -54,6 +74,8 @@ enum Command {
     Service {
         #[arg(long)]
         config: PathBuf,
+        #[arg(long, short)]
+        remove_existing_socket: bool,
     },
     #[clap(about = "query monitor service")]
     Query {
@@ -69,6 +91,9 @@ fn run_query(query: Query) -> anyhow::Result<()> {
             latency_higher_than,
             min_intensity,
             max_window,
+            display_skip_warning_threshold,
+            time_format,
+            show_original_line,
         } => {
             let query = PingReadingQuery::new(
                 Duration::from_millis(latency_higher_than.into()),
@@ -80,9 +105,16 @@ fn run_query(query: Query) -> anyhow::Result<()> {
                 TargetAndPingReadingQuery { target, query },
             ))?;
 
+            let display_options = PingQueryResultDisplayOptions {
+                display_skip_warning_threshold: display_skip_warning_threshold
+                    .map(|seconds| Duration::from_secs(seconds.into())),
+                time_format,
+                show_original_line,
+            };
+
             match server_response {
                 ServerResponse::PingQueryResult(results) => {
-                    display_ping_query_results(&results);
+                    display_ping_query_results(&results, &display_options);
                 }
                 ServerResponse::UnknownTarget(target) => {
                     println!("Server reply: Unknown target {target}");
@@ -100,13 +132,18 @@ main! {
         let args = Args::parse();
 
         match args.command {
-            Command::Service { config } => {
+            Command::Service { config, remove_existing_socket } => {
 
                 let mut buf = String::new();
                 let mut config_file = smol::fs::File::open(config).await?;
                 config_file.read_to_string(&mut buf).await?;
 
-                let config: config::Config = toml::from_str(&buf)?;
+                let mut config: config::Config = toml::from_str(&buf)?;
+
+                if remove_existing_socket {
+                    config.remove_existing_socket = Some(remove_existing_socket);
+                }
+
                 service::run_service(config).await
             },
             Command::Query { query } => {

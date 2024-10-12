@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use std::{
     collections::HashMap,
+    path::Path,
     sync::{Arc, Mutex},
 };
 
@@ -10,6 +11,7 @@ use smol::stream::StreamExt;
 
 use crate::{
     client::ClientCommand,
+    config::{Config, PingMonitorConfig},
     ping::{PingReading, PingReadingHistory, PingReadingQuery},
     util::{receive_length_prefixed_object_async, send_length_prefixed_object_async},
 };
@@ -17,12 +19,13 @@ use crate::{
 #[derive(Serialize, Deserialize)]
 pub enum ServerResponse {
     UnknownTarget(String),
-    PingQueryResult(HashMap<String, Vec<PingReading>>),
+    PingQueryResult(HashMap<String, (Vec<PingReading>, PingMonitorConfig)>),
 }
 
 #[derive(Default, Debug)]
 pub struct ServerState {
     pub ping_reading_histories: HashMap<String, Arc<Mutex<PingReadingHistory>>>,
+    pub config: Config,
 }
 
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
@@ -37,7 +40,8 @@ fn query_ping_readings_for_targets<
 >(
     target_readings: I,
     query: &PingReadingQuery,
-) -> HashMap<String, Vec<PingReading>> {
+    server_state: &ServerState,
+) -> HashMap<String, (Vec<PingReading>, PingMonitorConfig)> {
     let mut results = HashMap::new();
 
     for (target, reading_history) in target_readings {
@@ -45,7 +49,17 @@ fn query_ping_readings_for_targets<
 
         let target_result = query.query(reading_history.readings());
 
-        results.insert(target.clone(), target_result);
+        results.insert(
+            target.clone(),
+            (
+                target_result,
+                *server_state
+                    .config
+                    .ping_monitor_configs()
+                    .get(target)
+                    .expect(""),
+            ),
+        );
     }
 
     results
@@ -68,11 +82,13 @@ async fn serve_client(mut stream: UnixStream, server_state: &ServerState) -> any
                                 .get_key_value(&target)
                                 .into_iter(),
                             &query,
+                            server_state,
                         )
                     } else {
                         query_ping_readings_for_targets(
                             server_state.ping_reading_histories.iter(),
                             &query,
+                            server_state,
                         )
                     };
 
@@ -92,6 +108,11 @@ async fn serve_client(mut stream: UnixStream, server_state: &ServerState) -> any
 }
 
 pub async fn serve_query_server(server_state: ServerState) -> anyhow::Result<()> {
+    if server_state.config.remove_existing_socket.unwrap_or(false) {
+        let socket_path = Path::new(crate::UNIX_SOCKET_PATH);
+        let _ = std::fs::remove_file(socket_path);
+    }
+
     let listener = UnixListener::bind(crate::UNIX_SOCKET_PATH)?;
 
     let mut incoming = listener.incoming();

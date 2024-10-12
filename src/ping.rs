@@ -73,18 +73,23 @@ impl PingReadingQuery {
             }
         }
 
-        included_readings
+        let mut ordered_included_readings: Vec<usize> = included_readings.into_iter().collect();
+
+        ordered_included_readings.sort();
+
+        ordered_included_readings
             .into_iter()
             .map(|index| readings.get(index).unwrap())
-            .copied()
+            .cloned()
             .collect()
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PingReading {
-    latency: Duration,
-    timestamp: SystemTime,
+    pub latency: Duration,
+    pub timestamp: SystemTime,
+    pub original_line: String,
 }
 
 #[derive(Debug)]
@@ -118,6 +123,7 @@ impl PingReadingHistory {
                     return Some(PingReading {
                         latency: Duration::from_millis(time as u64),
                         timestamp: SystemTime::now(),
+                        original_line: line.to_string(),
                     });
                 }
             }
@@ -205,6 +211,7 @@ impl PingMonitor {
     pub async fn watch(&mut self) -> anyhow::Result<()> {
         loop {
             self._watch().await;
+            log::error!("Ping command stopped, waiting to retry");
             Timer::after(Duration::from_secs(5)).await;
         }
     }

@@ -41,14 +41,15 @@ pub async fn run_service(config: Config) -> anyhow::Result<()> {
 
     let server_state = ServerState {
         ping_reading_histories: reading_histories,
+        config,
     };
 
     let run_ping_monitors_task = smol::spawn(run_ping_monitors(ping_monitors));
 
     let serve_query_server_task = smol::spawn(serve_query_server(server_state));
 
-    run_ping_monitors_task.await;
     serve_query_server_task.await?;
+    run_ping_monitors_task.await;
 
     Ok(())
 }

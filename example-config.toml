@@ -1,2 +1,2 @@
 [ping-monitors]
-"8.8.8.8" = { interval-seconds = 2.3, history-length-hours = 48 }
+"8.8.8.8" = { interval-seconds = 1, history-length-hours = 48 }
